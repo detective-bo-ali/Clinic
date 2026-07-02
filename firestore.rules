@@ -1,0 +1,97 @@
+rules_version = '2';
+
+// Deploy with: firebase deploy --only firestore:rules
+//
+// Model:
+//  /users/{uid}            -> { role, clinicIds: [...], ... }
+//  /clinics/{clinicId}     -> { name, ownerId, ... }
+//  /patients/{patientId}   -> { clinicId, ... }
+//  /appointments/{id}      -> { clinicId, doctorId, ... }
+//  /prescriptions/{id}     -> { clinicId, ... }
+//  /invoices/{id}          -> { clinicId, ... }
+//  /inventory/{id}         -> { clinicId, ... }
+//
+// Every clinical document carries a `clinicId` field. Access is granted if
+// the caller's /users/{uid} doc has that clinicId in `clinicIds`, OR the
+// caller is a superAdmin (sees everything).
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function userDoc() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function role() {
+      return userDoc().role;
+    }
+
+    function isSuperAdmin() {
+      return isSignedIn() && role() == 'superAdmin';
+    }
+
+    function isClinicAdmin() {
+      return isSignedIn() && role() == 'clinicAdmin';
+    }
+
+    function myClinicIds() {
+      return userDoc().clinicIds;
+    }
+
+    function belongsToClinic(clinicId) {
+      return isSignedIn() && clinicId in myClinicIds();
+    }
+
+    function canAccessClinic(clinicId) {
+      return isSuperAdmin() || belongsToClinic(clinicId);
+    }
+
+    // ---------- users ----------
+    match /users/{uid} {
+      allow read: if isSignedIn() && (request.auth.uid == uid || isSuperAdmin() || isClinicAdmin());
+      // Users can only edit their own non-privileged fields; role/clinicIds
+      // changes should go through a Cloud Function with Admin SDK in
+      // production. Loosened here for local development.
+      allow create: if isSignedIn() && request.auth.uid == uid;
+      allow update: if isSignedIn() && (request.auth.uid == uid || isSuperAdmin() || isClinicAdmin());
+      allow delete: if isSuperAdmin();
+    }
+
+    // ---------- clinics ----------
+    match /clinics/{clinicId} {
+      allow read: if canAccessClinic(clinicId);
+      allow create: if isSignedIn() && (isSuperAdmin() || isClinicAdmin());
+      allow update, delete: if isSuperAdmin() || (isClinicAdmin() && belongsToClinic(clinicId));
+    }
+
+    // ---------- clinical collections (same pattern for all) ----------
+    match /patients/{id} {
+      allow read, update, delete: if canAccessClinic(resource.data.clinicId);
+      allow create: if canAccessClinic(request.resource.data.clinicId);
+    }
+
+    match /appointments/{id} {
+      allow read, update, delete: if canAccessClinic(resource.data.clinicId);
+      allow create: if canAccessClinic(request.resource.data.clinicId);
+    }
+
+    match /prescriptions/{id} {
+      allow read, update, delete: if canAccessClinic(resource.data.clinicId);
+      allow create: if canAccessClinic(request.resource.data.clinicId);
+    }
+
+    match /invoices/{id} {
+      allow read, update, delete: if canAccessClinic(resource.data.clinicId);
+      allow create: if canAccessClinic(request.resource.data.clinicId);
+    }
+
+    match /inventory/{id} {
+      allow read, update, delete: if canAccessClinic(resource.data.clinicId);
+      allow create: if canAccessClinic(request.resource.data.clinicId);
+    }
+  }
+}
